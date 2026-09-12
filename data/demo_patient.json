@@ -10,7 +10,7 @@
     "date": "2026-06-10",
     "plan_items": [
       {"id": "a1c", "text": "Repeat HbA1c before the next visit."},
-      {"id": "eye_referral", "text": "Complete the ophthalmology referral before the return visit."},
+      {"id": "eye_referral", "text": "Attend the ophthalmology consultation before the return visit."},
       {"id": "metformin", "text": "Continue metformin 500 mg twice daily."},
       {"id": "phq9", "text": "Complete a PHQ-9 questionnaire before the next visit."},
       {"id": "bp_log", "text": "Bring a 7-day home blood pressure log to the next visit."}
@@ -20,7 +20,7 @@
     "labs": [
       {
         "source_id": "LAB-2026-09-08-A1C",
-        "date": "2026-09-08",
+        "collected_date": "2026-09-08",
         "test": "HbA1c",
         "result": "7.1%",
         "status": "final"

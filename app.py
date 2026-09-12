@@ -87,6 +87,7 @@ else:
     output = st.session_state.careloop_results
     results = output["results"]
     tasks = output["staff_tasks"]
+    source_records = output["source_records"]
     completed = sum(item["status"] == "COMPLETED" for item in results)
     unresolved = len(results) - completed
 
@@ -94,9 +95,14 @@ else:
     st.header("Review Summary")
     summary_columns = st.columns(4)
     summary_columns[0].metric("Total plan items", len(results))
-    summary_columns[1].metric("Completed", completed)
-    summary_columns[2].metric("Unresolved", unresolved)
-    summary_columns[3].metric("Staff tasks created", len(tasks))
+    summary_columns[1].metric("Documented complete", completed)
+    summary_columns[2].metric("Needs review", unresolved)
+    summary_columns[3].metric("Draft staff tasks", len(tasks))
+
+    st.info(
+        "Assessment is limited to the supplied records. "
+        "Not documented does not mean not done."
+    )
 
     st.subheader("Plan Items")
     for item in results:
@@ -108,10 +114,15 @@ else:
                     f'<div class="completed-note"><strong>{heading}</strong></div>',
                     unsafe_allow_html=True,
                 )
-                st.caption("✓ COMPLETED")
+                st.caption("✓ DOCUMENTED COMPLETE")
             else:
                 st.markdown(f"#### ⚠️ {heading}")
-                st.error(item["status"], icon="⚠️")
+                st.warning(f"NEEDS REVIEW · {item['status']}", icon="⚠️")
+
+            checked_categories = ", ".join(
+                item["record_categories_checked"]
+            )
+            st.caption(f"Evidence checked: {checked_categories}")
 
             detail_columns = st.columns([1, 1])
             with detail_columns[0]:
@@ -122,11 +133,27 @@ else:
                 st.write(item["reason"])
 
             source_ids = item.get("source_ids", [])
-            st.markdown("**Cited source IDs**")
             if source_ids:
-                st.code("  •  ".join(source_ids), language=None)
+                with st.expander("View source evidence"):
+                    for source_id in source_ids:
+                        source = source_records[source_id]
+                        record = source["record"]
+                        st.markdown(f"**{source_id}**")
+                        st.caption(
+                            source["record_category"]
+                            .replace("_", " ")
+                            .title()
+                        )
+                        for key, value in record.items():
+                            if key != "source_id":
+                                label = key.replace("_", " ").title()
+                                st.markdown(f"- **{label}:** {value}")
             else:
-                st.caption("No source IDs cited")
+                with st.expander("View source evidence"):
+                    st.caption(
+                        "No positive source record documents completion "
+                        "in the supplied evidence."
+                    )
 
     st.header("Staff Tasks")
     if not tasks:

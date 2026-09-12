@@ -17,7 +17,35 @@ def load_chart(path="data/demo_patient.json"):
     return json.loads(Path(path).read_text())
 
 
-def build_schema():
+def build_evidence_selection_schema(record_categories):
+    return {
+        "type": "object",
+        "properties": {
+            "requests": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "item_id": {"type": "string"},
+                        "record_categories": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": sorted(record_categories),
+                            },
+                        },
+                    },
+                    "required": ["item_id", "record_categories"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["requests"],
+        "additionalProperties": False,
+    }
+
+
+def build_assessment_schema():
     return {
         "type": "object",
         "properties": {
@@ -54,56 +82,13 @@ def build_schema():
     }
 
 
-def call_agent(chart):
-    prompt = f"""
-You are CareLoop, a pre-visit care-plan verification agent.
-
-Your job is NOT to summarize the chart generally.
-For every prior plan item, determine whether what was supposed to happen
-actually happened before the upcoming visit.
-
-Use only the supplied synthetic chart evidence.
-
-Status meanings:
-COMPLETED = clear evidence the requested action occurred.
-PENDING = action exists/in progress but is not complete.
-NOT FOUND = expected evidence is absent from the supplied records.
-CONFLICTING = supplied records disagree in a way relevant to the plan.
-CANNOT VERIFY = evidence suggests something may have happened, but the
-requested action cannot actually be verified.
-
-Do not diagnose, recommend treatment, change medications, or invent evidence.
-
-Return ONE JSON object with exactly this top-level structure:
-{{
-  "items": [
-    {{
-      "item_id": "...",
-      "status": "...",
-      "evidence_summary": "...",
-      "source_ids": ["..."],
-      "reason": "..."
-    }}
-  ]
-}}
-
-The object must have exactly one top-level key: "items".
-Do NOT return a bare array.
-Do NOT wrap the JSON in markdown or code fences.
-Return exactly one items[] entry for every prior plan item.
-item_id must match the IDs provided in the chart.
-source_ids may contain only source IDs actually present in the supplied chart.
-
-CHART:
-{json.dumps(chart, indent=2)}
-"""
-
+def call_llm_task(prompt, schema):
     params = {
         "name": "llm-task",
         "args": {
             "prompt": prompt,
             "thinking": "low",
-            "schema": build_schema(),
+            "schema": schema,
         },
     }
 
@@ -134,18 +119,180 @@ CHART:
     return response["output"]["details"]["json"]
 
 
-def valid_source_ids(chart):
-    ids = set()
+def select_evidence(chart):
+    plan_items = chart["previous_visit"]["plan_items"]
+    record_categories = list(chart.get("records", {}).keys())
 
-    for records in chart.get("records", {}).values():
+    prompt = f"""
+You are selecting chart evidence for a pre-visit care-plan review.
+
+For each prior plan item, choose the smallest set of available record
+categories that is plausibly relevant to determining whether the requested
+follow-up is documented. Select categories even when they may contain no
+records, because an empty relevant category can support a NOT FOUND result.
+Choose enough categories to distinguish completion from scheduling or other
+progress; do not inspect only the category where final completion would appear.
+For example, assessing attendance at a consultation may require referral
+records for scheduling and specialist notes for completion.
+
+Return exactly one request for every plan item. Use only the supplied item IDs
+and category names. Do not invent tools, categories, or records.
+
+Return ONE JSON object with exactly this top-level structure:
+{{
+  "requests": [
+    {{
+      "item_id": "...",
+      "record_categories": ["..."]
+    }}
+  ]
+}}
+
+The object must have exactly one top-level key: "requests".
+Each request must have exactly the keys "item_id" and "record_categories".
+Do NOT use a key named "categories".
+Do NOT return a bare array.
+Do NOT wrap the JSON in markdown or code fences.
+
+PRIOR PLAN ITEMS:
+{json.dumps(plan_items, indent=2)}
+
+AVAILABLE RECORD CATEGORIES:
+{json.dumps(record_categories, indent=2)}
+"""
+
+    selection = call_llm_task(
+        prompt, build_evidence_selection_schema(record_categories)
+    )
+    return validate_evidence_selection(chart, selection)
+
+
+def validate_evidence_selection(chart, selection):
+    expected_ids = {
+        item["id"] for item in chart["previous_visit"]["plan_items"]
+    }
+    available_categories = set(chart.get("records", {}).keys())
+    requests = selection["requests"]
+    actual_ids = [request["item_id"] for request in requests]
+
+    if len(actual_ids) != len(set(actual_ids)):
+        raise ValueError("Agent returned duplicate evidence requests.")
+
+    if set(actual_ids) != expected_ids:
+        raise ValueError(
+            "Evidence-request mismatch. "
+            f"Expected {expected_ids}, got {set(actual_ids)}"
+        )
+
+    for request in requests:
+        categories = request["record_categories"]
+        if not categories:
+            raise ValueError(
+                f"No evidence categories requested for {request['item_id']}."
+            )
+        if len(categories) != len(set(categories)):
+            raise ValueError(
+                f"Duplicate evidence categories for {request['item_id']}."
+            )
+        invalid_categories = set(categories) - available_categories
+        if invalid_categories:
+            raise ValueError(
+                f"Agent requested invalid record categories: {invalid_categories}"
+            )
+
+    return selection
+
+
+def retrieve_evidence(chart, selection):
+    return {
+        request["item_id"]: {
+            "record_categories": request["record_categories"],
+            "records": {
+                category: chart["records"][category]
+                for category in request["record_categories"]
+            },
+        }
+        for request in selection["requests"]
+    }
+
+
+def call_agent(chart, evidence_by_item):
+    review_context = {
+        "patient": {
+            "upcoming_visit": chart["patient"]["upcoming_visit"],
+        },
+        "previous_visit": chart["previous_visit"],
+        "evidence_by_item": evidence_by_item,
+    }
+    prompt = f"""
+You are CareLoop, a pre-visit care-plan verification agent.
+
+Your job is NOT to summarize the chart generally.
+For every prior plan item, determine whether what was supposed to happen
+actually happened before the upcoming visit.
+
+Use only the synthetic evidence retrieved for each plan item. Assess every
+item only from the records in that item's evidence bundle. A source ID from
+another item's bundle is not available evidence for this item.
+
+Status meanings:
+COMPLETED = clear evidence the requested action occurred.
+PENDING = action exists/in progress but is not complete.
+NOT FOUND = expected evidence is absent from the supplied records.
+CONFLICTING = supplied records disagree in a way relevant to the plan.
+CANNOT VERIFY = evidence suggests something may have happened, but the
+requested action cannot actually be verified.
+
+Describe what is documented, not what the patient definitely did. Do not
+diagnose, recommend treatment, change medications, infer nonadherence, decide
+which medication direction is correct, or invent evidence.
+
+When medication directions differ, state that the documented directions
+differ and that the supplied records do not resolve the difference.
+
+If a home-monitoring log is due at the upcoming visit, absence of an uploaded
+log before that visit is not proof of failure. State that the log is not
+available for pre-visit verification and remains due at the return visit.
+
+Return ONE JSON object with exactly this top-level structure:
+{{
+  "items": [
+    {{
+      "item_id": "...",
+      "status": "...",
+      "evidence_summary": "...",
+      "source_ids": ["..."],
+      "reason": "..."
+    }}
+  ]
+}}
+
+The object must have exactly one top-level key: "items".
+Do NOT return a bare array.
+Do NOT wrap the JSON in markdown or code fences.
+Return exactly one items[] entry for every prior plan item.
+item_id must match the IDs provided in the chart.
+source_ids may contain only source IDs present in the evidence bundle retrieved
+for that same item. COMPLETED must cite at least one source ID. NOT FOUND may
+have an empty source_ids array.
+
+REVIEW CONTEXT AND RETRIEVED EVIDENCE:
+{json.dumps(review_context, indent=2)}
+"""
+
+    return call_llm_task(prompt, build_assessment_schema())
+
+
+def source_ids_for_item(evidence_by_item, item_id):
+    ids = set()
+    for records in evidence_by_item[item_id]["records"].values():
         for record in records:
             if "source_id" in record:
                 ids.add(record["source_id"])
-
     return ids
 
 
-def validate_results(chart, agent_result):
+def validate_results(chart, agent_result, evidence_by_item):
     expected_ids = {
         item["id"] for item in chart["previous_visit"]["plan_items"]
     }
@@ -160,19 +307,44 @@ def validate_results(chart, agent_result):
             f"Plan-item mismatch. Expected {expected_ids}, got {set(actual_ids)}"
         )
 
-    allowed_sources = valid_source_ids(chart)
-
     for item in agent_result["items"]:
         if item["status"] not in ALLOWED_STATUSES:
             raise ValueError(f"Invalid status: {item['status']}")
 
+        if item["status"] == "COMPLETED" and not item["source_ids"]:
+            raise ValueError(
+                f"COMPLETED item {item['item_id']} must cite source evidence."
+            )
+
+        allowed_sources = source_ids_for_item(
+            evidence_by_item, item["item_id"]
+        )
         unknown_sources = set(item["source_ids"]) - allowed_sources
         if unknown_sources:
             raise ValueError(
-                f"Agent invented source IDs: {unknown_sources}"
+                "Agent cited source IDs outside the retrieved evidence for "
+                f"{item['item_id']}: {unknown_sources}"
             )
 
+        item["record_categories_checked"] = evidence_by_item[
+            item["item_id"]
+        ]["record_categories"]
+
     return agent_result
+
+
+def build_source_record_lookup(evidence_by_item):
+    lookup = {}
+    for evidence in evidence_by_item.values():
+        for category, records in evidence["records"].items():
+            for record in records:
+                source_id = record.get("source_id")
+                if source_id:
+                    lookup[source_id] = {
+                        "record_category": category,
+                        "record": record,
+                    }
+    return lookup
 
 
 def create_staff_tasks(chart, results):
@@ -195,12 +367,24 @@ def create_staff_tasks(chart, results):
             "CONFLICTING": "Reconcile conflicting chart evidence before visit",
             "CANNOT VERIFY": "Verify item with patient or source before visit",
         }
+        action_by_item = {
+            "metformin": (
+                "Flag inconsistent documented directions for clinician or "
+                "pharmacist review"
+            ),
+            "bp_log": (
+                "Confirm whether the patient has the requested 7-day log "
+                "available to bring"
+            ),
+        }
 
         tasks.append(
             {
                 "item_id": result["item_id"],
                 "status": status,
-                "task": action_by_status[status],
+                "task": action_by_item.get(
+                    result["item_id"], action_by_status[status]
+                ),
                 "plan_item": plan_lookup[result["item_id"]],
             }
         )
@@ -210,14 +394,17 @@ def create_staff_tasks(chart, results):
 
 def run_careloop(path="data/demo_patient.json"):
     chart = load_chart(path)
-    raw_result = call_agent(chart)
-    validated = validate_results(chart, raw_result)
+    selection = select_evidence(chart)
+    evidence_by_item = retrieve_evidence(chart, selection)
+    raw_result = call_agent(chart, evidence_by_item)
+    validated = validate_results(chart, raw_result, evidence_by_item)
     tasks = create_staff_tasks(chart, validated)
 
     return {
         "patient": chart["patient"],
         "results": validated["items"],
         "staff_tasks": tasks,
+        "source_records": build_source_record_lookup(evidence_by_item),
     }
 
 
