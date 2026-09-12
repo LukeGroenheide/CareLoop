@@ -1,0 +1,66 @@
+{
+  "patient": {
+    "id": "SYN-001",
+    "name": "Jordan Lee",
+    "age": 47,
+    "visit_type": "Primary care return visit",
+    "upcoming_visit": "2026-09-15 09:00"
+  },
+  "previous_visit": {
+    "date": "2026-06-10",
+    "plan_items": [
+      {"id": "a1c", "text": "Repeat HbA1c before the next visit."},
+      {"id": "eye_referral", "text": "Complete the ophthalmology referral before the return visit."},
+      {"id": "metformin", "text": "Continue metformin 500 mg twice daily."},
+      {"id": "phq9", "text": "Complete a PHQ-9 questionnaire before the next visit."},
+      {"id": "bp_log", "text": "Bring a 7-day home blood pressure log to the next visit."}
+    ]
+  },
+  "records": {
+    "labs": [
+      {
+        "source_id": "LAB-2026-09-08-A1C",
+        "date": "2026-09-08",
+        "test": "HbA1c",
+        "result": "7.1%",
+        "status": "final"
+      }
+    ],
+    "referrals": [
+      {
+        "source_id": "REF-OPH-2041",
+        "specialty": "Ophthalmology",
+        "ordered": "2026-06-10",
+        "status": "scheduled",
+        "appointment_date": "2026-09-22"
+      }
+    ],
+    "medications": [
+      {
+        "source_id": "MED-LIST-0910",
+        "name": "Metformin",
+        "dose": "500 mg",
+        "frequency": "once daily",
+        "source": "current medication list",
+        "updated": "2026-09-10"
+      },
+      {
+        "source_id": "RX-FILL-0828",
+        "name": "Metformin",
+        "dose": "500 mg",
+        "frequency": "twice daily",
+        "source": "pharmacy fill history",
+        "filled": "2026-08-28"
+      }
+    ],
+    "questionnaires": [],
+    "intake": [
+      {
+        "source_id": "INTAKE-0912",
+        "date": "2026-09-12",
+        "text": "Patient reports checking blood pressure at home most days but did not upload or enter readings."
+      }
+    ],
+    "specialist_notes": []
+  }
+}
