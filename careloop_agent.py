@@ -377,6 +377,11 @@ which medication direction is correct, or invent evidence.
 When medication directions differ, state that the documented directions
 differ and that the supplied records do not resolve the difference.
 
+A specialist encounter note documenting that the requested consultation
+occurred before the upcoming visit supports COMPLETED. A referral record that
+also lists a later scheduled appointment does not by itself contradict the
+documented encounter or prevent COMPLETED.
+
 If a home-monitoring log is due at the upcoming visit, absence of an uploaded
 log before that visit is not proof of failure. State that the log is not
 available for pre-visit verification and remains due at the return visit.
@@ -519,11 +524,13 @@ def create_staff_tasks(chart, results):
     return tasks
 
 
-def run_careloop(path="data/demo_patient.json", chart=None):
+def run_careloop(path="data/demo_patient.json", chart=None, progress_callback=None):
     if chart is None:
         chart = load_chart(path)
     selection = select_evidence(chart)
     evidence_by_item = retrieve_evidence(chart, selection)
+    if progress_callback:
+        progress_callback("reviewing")
     raw_result = call_agent(chart, evidence_by_item)
     validated = validate_results(chart, raw_result, evidence_by_item)
     tasks = create_staff_tasks(chart, validated)
