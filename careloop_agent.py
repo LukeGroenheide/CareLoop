@@ -1,5 +1,6 @@
 import json
 import subprocess
+from datetime import date
 from pathlib import Path
 
 OPENCLAW = "/home/luke/.openclaw/bin/openclaw"
@@ -82,6 +83,30 @@ def build_assessment_schema():
     }
 
 
+def build_incoming_document_schema(record_categories):
+    return {
+        "type": "object",
+        "properties": {
+            "record_category": {
+                "type": "string",
+                "enum": sorted(record_categories),
+            },
+            "document_type": {"type": "string"},
+            "patient_name": {"type": "string"},
+            "event_date": {"type": "string"},
+            "summary": {"type": "string"},
+        },
+        "required": [
+            "record_category",
+            "document_type",
+            "patient_name",
+            "event_date",
+            "summary",
+        ],
+        "additionalProperties": False,
+    }
+
+
 def call_llm_task(prompt, schema):
     params = {
         "name": "llm-task",
@@ -117,6 +142,108 @@ def call_llm_task(prompt, schema):
         raise RuntimeError(response)
 
     return response["output"]["details"]["json"]
+
+
+def validate_incoming_document(chart, interpretation):
+    required_fields = {
+        "record_category",
+        "document_type",
+        "patient_name",
+        "event_date",
+        "summary",
+    }
+    if set(interpretation) != required_fields:
+        raise ValueError("Incoming-document interpretation has invalid fields.")
+
+    for field in required_fields:
+        if not isinstance(interpretation[field], str) or not interpretation[
+            field
+        ].strip():
+            raise ValueError(f"Incoming-document field {field} is required.")
+
+    if interpretation["record_category"] not in chart.get("records", {}):
+        raise ValueError(
+            "Incoming document used an invalid record category: "
+            f"{interpretation['record_category']}"
+        )
+
+    if interpretation["patient_name"] != chart["patient"]["name"]:
+        raise ValueError(
+            "Incoming document patient does not match the synthetic patient."
+        )
+
+    try:
+        date.fromisoformat(interpretation["event_date"])
+    except ValueError as exc:
+        raise ValueError(
+            "Incoming-document event_date must use YYYY-MM-DD."
+        ) from exc
+
+    return interpretation
+
+
+def interpret_incoming_document(chart, raw_document, source_prefix):
+    record_categories = list(chart.get("records", {}).keys())
+    prompt = f"""
+You interpret one synthetic clinical document for storage in a chart.
+
+Describe only what the supplied document states. Identify its best matching
+record category, document type, patient name, event date, and a concise factual
+summary. For a document covering multiple dates, use its completion or latest
+recorded date as event_date.
+
+Do not compare this document with a care plan. Do not assign a completion
+status, generate tasks, diagnose, recommend treatment, decide medication
+changes, or invent facts.
+
+Return ONE JSON object with exactly this structure:
+{{
+  "record_category": "...",
+  "document_type": "...",
+  "patient_name": "...",
+  "event_date": "YYYY-MM-DD",
+  "summary": "..."
+}}
+
+record_category must be one of the available category names. Do not generate a
+source ID. Do not wrap the JSON in markdown or code fences.
+
+Category guidance:
+- labs: laboratory test records
+- referrals: referral orders, scheduling, or referral status records
+- medications: medication lists or dispensing records
+- questionnaires: standardized questionnaires such as PHQ-9
+- intake: patient-supplied pre-visit information and home-monitoring logs
+- specialist_notes: documentation of completed specialist encounters
+
+AVAILABLE RECORD CATEGORIES:
+{json.dumps(record_categories, indent=2)}
+
+RAW SYNTHETIC DOCUMENT:
+{raw_document}
+"""
+
+    interpretation = call_llm_task(
+        prompt, build_incoming_document_schema(record_categories)
+    )
+    validated = validate_incoming_document(chart, interpretation)
+    event_date = date.fromisoformat(validated["event_date"])
+    source_id = f"{source_prefix}-{event_date.strftime('%m%d')}"
+
+    return {
+        "source_id": source_id,
+        "record_category": validated["record_category"],
+        "raw_document": raw_document,
+        "interpretation": validated,
+        "record": {
+            "source_id": source_id,
+            "document_type": validated["document_type"],
+            "patient_name": validated["patient_name"],
+            "event_date": validated["event_date"],
+            "summary": validated["summary"],
+            "raw_document": raw_document,
+        },
+    }
 
 
 def select_evidence(chart):
@@ -392,8 +519,9 @@ def create_staff_tasks(chart, results):
     return tasks
 
 
-def run_careloop(path="data/demo_patient.json"):
-    chart = load_chart(path)
+def run_careloop(path="data/demo_patient.json", chart=None):
+    if chart is None:
+        chart = load_chart(path)
     selection = select_evidence(chart)
     evidence_by_item = retrieve_evidence(chart, selection)
     raw_result = call_agent(chart, evidence_by_item)
